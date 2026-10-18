@@ -1,77 +1,59 @@
 import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from telegram.request import HTTPXRequest
+import threading
+from flask import Flask
+import telebot
 from dotenv import load_dotenv
 
-load_dotenv()  # loads from .env file on your laptop
+load_dotenv()
 
-# --- CONFIG - Now reads from environment (safe for GitHub) ---
-TOKEN = os.getenv("BOT_TOKEN")  # we get it from env, not hardcoded
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
-# ------------------------------------------------------------
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-if not TOKEN:
-    raise ValueError("BOT_TOKEN not found! Set it in .env file or Render dashboard")
+bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
-pending = {}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            "👋 Send me your confession — text, photo, video, voice.\n"
-            "It will be posted ANONYMOUSLY after review."
-        )
+# --- Confession handling ---
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, "👋 Send me your anonymous confession and I'll post it to the channel.")
 
-async def receive_confession(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+
+@bot.message_handler(func=lambda m: True)
+def handle_confession(message):
+    if not message.text:
         return
-    msg_id = str(update.message.message_id)
-    pending[msg_id] = update.message
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Approve", callback_data=f"approve_{msg_id}"),
-        InlineKeyboardButton("❌ Reject", callback_data=f"reject_{msg_id}")
-    ]])
+    # Forward to admin for approval, or directly to channel
+    text = f"🕊️ Anonymous Confession:\n\n{message.text}"
 
     try:
-        await update.message.copy(chat_id=ADMIN_ID, caption=f"🕵️ New confession ID {msg_id}\n\n{update.message.text or update.message.caption or ''}", reply_markup=keyboard)
-        await update.effective_message.reply_text("✅ Received! Pending admin review.")
+        # Post directly to channel - change to ADMIN_ID if you want approval first
+        bot.send_message(CHANNEL_ID, text)
+        bot.reply_to(message, "✅ Your confession was posted anonymously!")
     except Exception as e:
-        print(f"Admin send failed: {e}")
-        await update.effective_message.reply_text(f"❌ Failed to send to admin. Check ADMIN_ID.")
+        bot.reply_to(message, f"❌ Error: {e}")
 
-async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query or not query.data:
-        return
-    await query.answer()
-    try:
-        action, msg_id = query.data.split("_", 1)
-    except:
-        return
-    original = pending.get(msg_id)
-    if not original:
-        await query.edit_message_caption(caption="Already handled.")
-        return
-    if action == "approve":
-        try:
-            if original.text:
-                await context.bot.send_message(chat_id=CHANNEL_ID, text=f"🤫 Anonymous Confession:\n\n{original.text}")
-            else:
-                await original.copy(chat_id=CHANNEL_ID, caption=f"🤫 Anonymous Confession\n\n{original.caption or ''}")
-            await query.edit_message_caption(caption=f"✅ Posted - {msg_id}")
-        except Exception as e:
-            await query.edit_message_caption(caption=f"❌ Failed to post: {e}")
-    else:
-        await query.edit_message_caption(caption=f"❌ Rejected - {msg_id}")
-    pending.pop(msg_id, None)
 
-request = HTTPXRequest(connect_timeout=30, read_timeout=30)
-app = ApplicationBuilder().token(TOKEN).request(request).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(handle_admin))
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, receive_confession))
-print("Anonymous bot running...")
-app.run_polling()
+# --- Fake website for Render Free Tier ---
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+
+def run_bot():
+    print("Bot polling started...")
+    bot.infinity_polling()
+
+
+if __name__ == "__main__":
+    # Run Flask in background
+    threading.Thread(target=run_flask, daemon=True).start()
+    # Run Telegram bot in main thread
+    run_bot()
